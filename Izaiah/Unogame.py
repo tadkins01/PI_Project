@@ -554,7 +554,13 @@ if __name__ == "__main__":
     server = UnoServer()
     server.start()
 
-
+"""
+================================================
+  UNO GAME CLIENT - Pi Party Edition
+  Run this to join your classmate's UNO game!
+  You'll be asked for the host's IP address.
+================================================
+"""
 
 import socket
 import threading
@@ -1034,3 +1040,40 @@ class UnoClient:
 if __name__ == "__main__":
     client = UnoClient()
     client.run()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+"""
+================================================
+  UNO GAME CLIENT - Pi Party Edition
+  Run this to join your classmate's UNO game!
+  You'll be asked for the host's IP address.
+================================================
+"""
