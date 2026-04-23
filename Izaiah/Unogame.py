@@ -1,3 +1,15 @@
+"""
+UNO Pi Party Server
+A real-time multiplayer UNO game server using sockets and threading.
+
+Features:
+- Multiplayer lobby system (2–4 players)
+- Full UNO gameplay logic (cards, turns, rules)
+- Wild cards, stacking, and special effects
+- UNO call & challenge system
+- Real-time JSON communication with clients
+"""
+
 import socket
 import threading
 import json
