@@ -1,12 +1,3 @@
-"""
-================================================
-  UNO GAME SERVER - Pi Party Edition
-  Hosts the game so classmates can connect!
-  Run this on YOUR computer first, then share
-  your IP address with classmates.
-================================================
-"""
-
 import socket
 import threading
 import json
@@ -562,4 +553,484 @@ class UnoServer:
 if __name__ == "__main__":
     server = UnoServer()
     server.start()
-    
+
+
+
+import socket
+import threading
+import json
+import sys
+import os
+import time
+
+# ─────────────────────────────────────────────
+#  CONSTANTS
+# ─────────────────────────────────────────────
+DEFAULT_PORT = 5555
+COLORS = ["Red", "Green", "Blue", "Yellow"]
+
+COLOR_CODES = {
+    "Red":    "\033[91m",
+    "Green":  "\033[92m",
+    "Yellow": "\033[93m",
+    "Blue":   "\033[94m",
+    "Wild":   "\033[95m",
+    "Reset":  "\033[0m",
+    "Bold":   "\033[1m",
+    "Cyan":   "\033[96m",
+    "White":  "\033[97m",
+    "Gray":   "\033[90m",
+}
+
+def color(text, clr):
+    return f"{COLOR_CODES.get(clr, '')}{text}{COLOR_CODES['Reset']}"
+
+def bold(text):
+    return f"{COLOR_CODES['Bold']}{text}{COLOR_CODES['Reset']}"
+
+
+# ─────────────────────────────────────────────
+#  DISPLAY HELPERS
+# ─────────────────────────────────────────────
+def clear_screen():
+    os.system("cls" if os.name == "nt" else "clear")
+
+def print_banner():
+    print(color("=" * 52, "Cyan"))
+    print(color("   🃏  UNO  —  Pi Party Edition  🎉", "Bold"))
+    print(color("=" * 52, "Cyan"))
+
+def format_card(card):
+    """Format a card for display with color."""
+    c = card["color"]
+    v = card["value"]
+    if c == "Wild":
+        return color(f"[{v}]", "Wild")
+    return color(f"[{c} {v}]", c)
+
+def print_hand(hand, highlight_playable=None, top_card=None, declared_color=None):
+    """Print a numbered list of cards in the player's hand."""
+    print(bold("\n📋 Your Hand:"))
+    for i, card in enumerate(hand):
+        playable = ""
+        if highlight_playable and top_card:
+            if can_play(card, top_card, declared_color):
+                playable = color(" ✓", "Green")
+            else:
+                playable = color(" ✗", "Gray")
+        print(f"  {i+1:2}. {format_card(card)}{playable}")
+
+def print_top_card(top_card, declared_color=None):
+    """Print the current top of discard pile."""
+    card_str = format_card(top_card)
+    dc = f"  (Declared: {color(declared_color, declared_color)})" if declared_color else ""
+    print(f"\n🎴 Top Card: {card_str}{dc}")
+
+def print_players(player_card_counts, current_player, my_name, player_order):
+    """Print all players and their card counts."""
+    print(bold("\n👥 Players:"))
+    for name in player_order:
+        count = player_card_counts.get(name, 0)
+        marker = color(" ◄ THEIR TURN", "Yellow") if name == current_player else ""
+        me = color(" (you)", "Cyan") if name == my_name else ""
+        uno_alert = color(" 🚨 UNO!", "Red") if count == 1 else ""
+        print(f"  {'→' if name == current_player else ' '} {name}{me}: {count} card(s){uno_alert}{marker}")
+
+def can_play(card, top_card, declared_color=None):
+    """Client-side check if a card can be played."""
+    if card["value"] in ("Wild", "WildDraw4"):
+        return True
+    active_color = declared_color if top_card["value"] in ("Wild", "WildDraw4") else top_card["color"]
+    if card["color"] == active_color:
+        return True
+    if card["value"] == top_card["value"]:
+        return True
+    return False
+
+def print_game_state(state, my_name, pending_draw=0):
+    """Render the full game board."""
+    clear_screen()
+    print_banner()
+
+    top_card = state.get("top_card")
+    declared_color = state.get("declared_color")
+    current_player = state.get("current_player")
+    hand = state.get("your_hand", [])
+    player_order = state.get("player_order", [])
+    player_card_counts = state.get("player_card_counts", {})
+    direction_val = state.get("direction", 1)
+    turn = state.get("turn_count", 0)
+    pending = state.get("pending_draw", 0)
+
+    direction_str = color("↻ Clockwise", "Green") if direction_val == 1 else color("↺ Counter-CW", "Yellow")
+    print(f"\n  Turn #{turn}  |  Direction: {direction_str}")
+
+    if top_card:
+        print_top_card(top_card, declared_color)
+
+    if pending > 0:
+        print(color(f"\n⚠️  Pending Draw: {pending} cards (draw or stack!)", "Red"))
+
+    print_players(player_card_counts, current_player, my_name, player_order)
+
+    if hand:
+        print_hand(hand, highlight_playable=True, top_card=top_card, declared_color=declared_color)
+
+    is_my_turn = current_player == my_name
+    print()
+    if is_my_turn:
+        print(color("  ★  IT'S YOUR TURN!", "Yellow"))
+    else:
+        print(color(f"  Waiting for {current_player}...", "Gray"))
+
+    print(color("\n─" * 52, "Gray"))
+
+
+# ─────────────────────────────────────────────
+#  INPUT HELPERS
+# ─────────────────────────────────────────────
+def get_input(prompt, valid_options=None, allow_empty=False):
+    """Get validated input from the user."""
+    while True:
+        try:
+            val = input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n[Disconnected]")
+            sys.exit(0)
+        if allow_empty and val == "":
+            return val
+        if valid_options and val.lower() not in [v.lower() for v in valid_options]:
+            print(color(f"  Invalid input. Choose: {', '.join(valid_options)}", "Red"))
+            continue
+        return val
+
+def choose_card_to_play(hand, top_card, declared_color, pending_draw):
+    """Let the player pick a card or draw."""
+    playable = [i for i, c in enumerate(hand) if can_play(c, top_card, declared_color)]
+
+    if pending_draw > 0:
+        print(color(f"\n⚠️  You must draw {pending_draw} cards — unless you can stack a matching draw card!", "Red"))
+
+    if not playable and pending_draw == 0:
+        print(color("\n  No playable cards. You must draw.", "Gray"))
+        input("  Press Enter to draw a card...")
+        return "draw", None
+
+    print(color(f"\n  Options:", "Cyan"))
+    print(f"    Enter a card number (1–{len(hand)}) to play")
+    print(f"    Type 'd' to draw a card")
+    print(f"    Type 'u' to say UNO (when you have 2 cards!)")
+    print(f"    Type 'c' to challenge UNO")
+    print(f"    Type 'chat' to send a message")
+    print(f"    Type 'q' to quit")
+
+    while True:
+        raw = input(color("\n  Your move: ", "Bold")).strip()
+        if raw.lower() == "d":
+            return "draw", None
+        if raw.lower() == "u":
+            return "uno", None
+        if raw.lower() == "c":
+            return "challenge", None
+        if raw.lower() == "chat":
+            msg = input("  Message: ").strip()
+            return "chat", msg
+        if raw.lower() == "q":
+            print("  Thanks for playing!")
+            sys.exit(0)
+        if raw.isdigit():
+            idx = int(raw) - 1
+            if 0 <= idx < len(hand):
+                card = hand[idx]
+                if can_play(card, top_card, declared_color):
+                    return "play", idx
+                else:
+                    print(color("  That card can't be played right now.", "Red"))
+            else:
+                print(color(f"  Please enter a number between 1 and {len(hand)}.", "Red"))
+        else:
+            print(color("  Invalid input.", "Red"))
+
+def choose_color():
+    """Prompt player to choose a color after playing a Wild."""
+    print(color("\n🎨 Choose a color:", "Bold"))
+    for i, c in enumerate(COLORS, 1):
+        print(f"  {i}. {color(c, c)}")
+    while True:
+        raw = input("  Enter 1–4 or color name: ").strip()
+        if raw.isdigit() and 1 <= int(raw) <= 4:
+            return COLORS[int(raw) - 1]
+        for c in COLORS:
+            if raw.lower() == c.lower():
+                return c
+        print(color("  Invalid. Choose Red, Green, Blue, or Yellow.", "Red"))
+
+
+# ─────────────────────────────────────────────
+#  UNO CLIENT
+# ─────────────────────────────────────────────
+class UnoClient:
+    def __init__(self):
+        self.sock = None
+        self.my_name = ""
+        self.current_state = None
+        self.game_started = False
+        self.game_over = False
+        self.running = True
+        self.lock = threading.Lock()
+        self.my_turn_event = threading.Event()
+        self.pending_messages = []   # Queued server messages to display
+        self.choose_color_flag = False
+
+    def connect(self, host, port):
+        """Connect to the server."""
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.connect((host, port))
+
+    def _send(self, data):
+        try:
+            msg = json.dumps(data) + "\n"
+            self.sock.sendall(msg.encode("utf-8"))
+        except Exception as e:
+            print(color(f"\n[Error sending] {e}", "Red"))
+
+    def _recv_loop(self):
+        """Background thread: continuously receive messages from server."""
+        buffer = ""
+        while self.running:
+            try:
+                chunk = self.sock.recv(4096).decode("utf-8")
+                if not chunk:
+                    print(color("\n[Server disconnected]", "Red"))
+                    self.running = False
+                    break
+                buffer += chunk
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    if line:
+                        try:
+                            data = json.loads(line)
+                            self._handle_server_message(data)
+                        except json.JSONDecodeError:
+                            pass
+            except Exception:
+                self.running = False
+                break
+
+    def _handle_server_message(self, data):
+        """Process a message received from the server."""
+        msg_type = data.get("type")
+
+        if msg_type == "name_request":
+            # Handled in main flow
+            pass
+
+        elif msg_type == "lobby_joined":
+            print(color(f"\n✅ {data['message']}", "Green"))
+            print(f"  Players in lobby: {', '.join(data['players'])}")
+            print(color(f"\n  Waiting for {data['min_players']}–{data['max_players']} players...", "Gray"))
+            print(color("  Type 'start' to start the game (if you're the host)\n", "Cyan"))
+
+        elif msg_type == "player_joined":
+            print(color(f"\n🎉 {data['message']}", "Green"))
+            print(f"  Players: {', '.join(data['players'])}")
+
+        elif msg_type == "player_left":
+            print(color(f"\n👋 {data['message']}", "Yellow"))
+
+        elif msg_type == "game_starting":
+            print(color(f"\n🃏 {data['message']}", "Bold"))
+            time.sleep(0.5)
+
+        elif msg_type == "game_state":
+            with self.lock:
+                self.current_state = data.get("state")
+                self.game_started = True
+            message = data.get("message", "")
+            if message:
+                self.pending_messages.append(color(f"\n  📢 {message}", "Cyan"))
+
+            # Trigger turn if it's ours
+            if self.current_state and self.current_state.get("current_player") == self.my_name:
+                if not self.current_state.get("game_over"):
+                    self.my_turn_event.set()
+
+        elif msg_type == "drew_cards":
+            cards_str = ", ".join(format_card(c) for c in data.get("cards", []))
+            self.pending_messages.append(color(f"\n  🎴 You drew: {cards_str}", "Yellow"))
+
+        elif msg_type == "choose_color":
+            self.choose_color_flag = True
+
+        elif msg_type == "uno_called":
+            self.pending_messages.append(color(f"\n  🚨 {data['message']}", "Red"))
+
+        elif msg_type in ("uno_challenge_success", "uno_challenge_fail"):
+            self.pending_messages.append(color(f"\n  ⚡ {data['message']}", "Yellow"))
+
+        elif msg_type == "chat":
+            self.pending_messages.append(color(f"\n  💬 [{data['from']}]: {data['message']}", "White"))
+
+        elif msg_type == "game_over":
+            self.game_over = True
+            self.pending_messages.append(color(f"\n  🏆 {data['message']}", "Bold"))
+            self.my_turn_event.set()  # Unblock input loop
+
+        elif msg_type == "error":
+            self.pending_messages.append(color(f"\n  ❌ {data['message']}", "Red"))
+
+    def _flush_messages(self):
+        """Print any pending messages."""
+        with self.lock:
+            msgs = self.pending_messages[:]
+            self.pending_messages = []
+        for m in msgs:
+            print(m)
+
+    def run(self):
+        """Main client flow."""
+        clear_screen()
+        print_banner()
+
+        # Get server IP
+        host = input(color("\n  Enter host IP address: ", "Cyan")).strip()
+        if not host:
+            host = "127.0.0.1"
+
+        port_str = input(color(f"  Enter port [{DEFAULT_PORT}]: ", "Cyan")).strip()
+        port = int(port_str) if port_str.isdigit() else DEFAULT_PORT
+
+        print(color(f"\n  Connecting to {host}:{port}...", "Gray"))
+        try:
+            self.connect(host, port)
+        except Exception as e:
+            print(color(f"\n  ❌ Could not connect: {e}", "Red"))
+            print("  Make sure the server is running and the IP/port is correct.")
+            sys.exit(1)
+
+        # Start receiver thread
+        recv_thread = threading.Thread(target=self._recv_loop)
+        recv_thread.daemon = True
+        recv_thread.start()
+
+        # Wait for name request
+        time.sleep(0.3)
+        self.my_name = input(color("  Your name: ", "Cyan")).strip()[:16]
+        if not self.my_name:
+            self.my_name = "Player"
+        self._send({"type": "name", "name": self.my_name})
+
+        print(color(f"\n  Hello, {self.my_name}! Waiting in lobby...", "Green"))
+
+        # Lobby loop — wait for game to start, allow manual start
+        while not self.game_started and self.running:
+            self._flush_messages()
+            try:
+                cmd = input("  > ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                break
+            if cmd == "start":
+                self._send({"type": "start_game"})
+            elif cmd == "quit" or cmd == "q":
+                sys.exit(0)
+            elif cmd:
+                self._send({"type": "chat", "message": cmd})
+            time.sleep(0.1)
+
+        # Main game loop
+        while not self.game_over and self.running:
+            # Wait for our turn
+            self.my_turn_event.wait(timeout=0.5)
+
+            with self.lock:
+                state = self.current_state
+                is_my_turn = state and state.get("current_player") == self.my_name if state else False
+                game_over = state.get("game_over") if state else False
+
+            if game_over or self.game_over:
+                self._flush_messages()
+                break
+
+            if not is_my_turn:
+                # Display state and flush messages while waiting
+                if state:
+                    print_game_state(state, self.my_name)
+                    self._flush_messages()
+                time.sleep(0.5)
+                continue
+
+            # It's our turn!
+            self.my_turn_event.clear()
+
+            with self.lock:
+                state = self.current_state
+
+            print_game_state(state, self.my_name)
+            self._flush_messages()
+
+            # Handle color choice if needed
+            if self.choose_color_flag:
+                chosen = choose_color()
+                self._send({"type": "declare_color", "color": chosen})
+                self.choose_color_flag = False
+                continue
+
+            top_card = state.get("top_card")
+            declared_color = state.get("declared_color")
+            hand = state.get("your_hand", [])
+            pending = state.get("pending_draw", 0)
+
+            action, data = choose_card_to_play(hand, top_card, declared_color, pending)
+
+            if action == "play":
+                card = hand[data]
+                self._send({"type": "play_card", "color": card["color"], "value": card["value"]})
+
+                # If it's a wild, wait briefly then ask for color
+                if card["value"] in ("Wild", "WildDraw4"):
+                    time.sleep(0.3)
+                    chosen = choose_color()
+                    self._send({"type": "declare_color", "color": chosen})
+
+                # Auto say UNO if 2 cards (after playing = 1 left)
+                if len(hand) == 2:
+                    time.sleep(0.1)
+                    self._send({"type": "say_uno"})
+                    print(color("\n  🚨 UNO! (auto-called)", "Red"))
+
+            elif action == "draw":
+                self._send({"type": "draw_card"})
+
+            elif action == "uno":
+                self._send({"type": "say_uno"})
+                print(color("  🚨 UNO called!", "Red"))
+
+            elif action == "challenge":
+                self._send({"type": "challenge_uno"})
+                print(color("  ⚡ UNO challenge sent!", "Yellow"))
+
+            elif action == "chat":
+                self._send({"type": "chat", "message": data})
+
+            time.sleep(0.2)
+
+        # Game over
+        print_banner()
+        if self.current_state:
+            winner = self.current_state.get("winner")
+            if winner:
+                if winner == self.my_name:
+                    print(color("\n  🏆 YOU WIN! Congratulations! 🎉", "Bold"))
+                else:
+                    print(color(f"\n  {winner} wins the game. Better luck next time!", "Yellow"))
+        self._flush_messages()
+        print(color("\n  Thanks for playing Pi Party UNO!\n", "Cyan"))
+        input("  Press Enter to exit...")
+
+
+# ─────────────────────────────────────────────
+#  ENTRY POINT
+# ─────────────────────────────────────────────
+if __name__ == "__main__":
+    client = UnoClient()
+    client.run()
