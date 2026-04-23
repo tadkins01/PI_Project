@@ -567,11 +567,16 @@ if __name__ == "__main__":
     server.start()
 
 """
-================================================
-  UNO GAME CLIENT - Pi Party Edition
-  Run this to join your classmate's UNO game!
-  You'll be asked for the host's IP address.
-================================================
+UNO Pi Party Client
+A terminal-based multiplayer UNO game client using sockets.
+
+Features:
+- Connects to UNO Pi Party server
+- Real-time game state rendering in terminal
+- Colored card display using ANSI escape codes
+- Turn-based input system with validation
+- UNO call, challenge, and chat support
+- Wild card color selection interface
 """
 
 import socket
