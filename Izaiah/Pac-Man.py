@@ -478,8 +478,8 @@ class NumberGuess:
 ║                                                                              ║
 ║  Controls (your turn only)                                                  ║
 ║  ─────────────────────────────────────────────────────────────────────────  ║
-║  Arrow keys  — move                                                         ║
-║  Q           — end your turn early                                          ║
+║  W / A / S / D  — move                                                      ║
+║  Q              — end your turn early                                       ║
 ║                                                                              ║
 ║  Scoring                                                                     ║
 ║  ─────────────────────────────────────────────────────────────────────────  ║
@@ -786,7 +786,7 @@ class _SoloGame:
         if footer_row < height:
             try:
                 stdscr.addstr(footer_row, 0,
-                               "  Arrow keys: move   Q: end turn"[:width - 1],
+                               "  WASD: move   Q: quit"[:width - 1],
                                curses.A_DIM)
             except curses.error:
                 pass
@@ -832,13 +832,13 @@ class _SoloGame:
             if key in (ord("q"), ord("Q")):
                 break
 
-            if key == curses.KEY_UP:
+            if key in (ord("w"), ord("W")):
                 player["next_dr"] = -1; player["next_dc"] = 0
-            elif key == curses.KEY_DOWN:
+            elif key in (ord("s"), ord("S")):
                 player["next_dr"] =  1; player["next_dc"] = 0
-            elif key == curses.KEY_LEFT:
+            elif key in (ord("a"), ord("A")):
                 player["next_dr"] =  0; player["next_dc"] = -1
-            elif key == curses.KEY_RIGHT:
+            elif key in (ord("d"), ord("D")):
                 player["next_dr"] =  0; player["next_dc"] =  1
 
             now = time.monotonic()
@@ -960,7 +960,7 @@ class PacManGame:
         """
         cprint("\n  🎮  Pac-Man Tournament  —  4 Players, Solo Turns", C.YELLOW + C.BOLD)
         cprint("  Each person plays alone, one after another.", C.DIM)
-        cprint("  Arrow keys to move, Q to end your turn early.\n", C.WHITE)
+        cprint("  Use WASD to move.  Q to end your turn early.\n", C.WHITE)
 
         # Collect names
         names: List[str] = []
