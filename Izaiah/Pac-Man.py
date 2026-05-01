@@ -468,33 +468,234 @@ class NumberGuess:
         return "\n".join(lines)
 
 
-# ── Pac-Man Game (4 Players, local curses) ─────────────────────────────────────
-#
-#  Players share one terminal (same machine).  Up to 4 human players use
-#  separate key sets; any unfilled slots are left empty (no AI ghosts fill in –
-#  you need at least 2 humans).  One life each.  Highest pellet score wins.
-#
-#  Controls
-#  --------
-#  P1  Arrow keys          P2  W / A / S / D
-#  P3  I / J / K / L       P4  Numpad 8 / 4 / 5 / 6  (or T/F/G/H)
-#
-#  Scoring
-#  -------
-#  Pellet      10 pts     Power pellet   50 pts
-#  Ghost eat  200 pts     Level clear   500 pts bonus
-#
-#  Ghosts
-#  ------
-#  4 classic ghosts (Blinky, Pinky, Inky, Clyde) with scatter/chase AI.
-#  During frightened mode they turn blue and can be eaten for 200 pts.
+"""
+╔══════════════════════════════════════════════════════════════════════════════╗
+║              PAC-MAN  —  Merged Multiplayer + Chase Edition                 ║
+║                                                                              ║
+║  Combines PacManGame (4-player, 20×20 maze, scatter/chase ghost AI,         ║
+║  power pellets) with PacmanChase (BFS ghost pathfinding, timer, lives HUD). ║
+║                                                                              ║
+║  Controls                                                                    ║
+║  ─────────────────────────────────────────────────────────────────────────  ║
+║  P1  Arrow keys          P2  W / A / S / D                                  ║
+║  P3  I / J / K / L       P4  8 / 4 / 5 / 6  (number row or numpad)         ║
+║                                                                              ║
+║  Scoring                                                                     ║
+║  ─────────────────────────────────────────────────────────────────────────  ║
+║  Pellet      10 pts     Power pellet   50 pts                               ║
+║  Ghost eat  200 pts     Level clear   500 pts bonus                         ║
+║                                                                              ║
+║  Ghosts                                                                      ║
+║  ─────────────────────────────────────────────────────────────────────────  ║
+║  4 classic ghosts (Blinky, Pinky, Inky, Clyde).                             ║
+║  • Normal mode  : BFS chase toward nearest living player                    ║
+║  • Scatter mode : drift to corner scatter targets                            ║
+║  • Frightened   : random walks — eat them for 200 pts!                      ║
+║  • Dead         : BFS beeline back to ghost house                           ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+"""
+
+import curses
+import random
+import sys
+import time
+from collections import deque
+from typing import Any, Dict, List, Optional, Tuple
+
+
+# ── Tiny colour-print helpers (used outside curses) ───────────────────────────
+
+class C:
+    RESET   = "\033[0m"
+    BOLD    = "\033[1m"
+    DIM     = "\033[2m"
+    RED     = "\033[31m"
+    GREEN   = "\033[32m"
+    YELLOW  = "\033[33m"
+    CYAN    = "\033[36m"
+    WHITE   = "\033[37m"
+
+def cprint(msg: str, style: str = "") -> None:
+    print(f"{style}{msg}{C.RESET}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Ghost
+# ══════════════════════════════════════════════════════════════════════════════
+
+class Ghost:
+    """
+    A single ghost with full state.
+
+    Movement priority
+    -----------------
+    1. Dead      → BFS back to home cell, then revive
+    2. Frightened → random valid neighbour (never reverse unless forced)
+    3. Scatter   → BFS toward corner scatter_target
+    4. Chase     → BFS toward nearest living player
+    """
+
+    DIRS = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+
+    def __init__(
+        self,
+        row: int,
+        col: int,
+        scatter_target: Tuple[int, int],
+        color_pair: int,
+        home_row: int,
+        home_col: int,
+    ) -> None:
+        self.row = row
+        self.col = col
+        self.dr = 0
+        self.dc = 0
+        self.scatter_target = scatter_target
+        self.color_pair = color_pair
+        self.home_row = home_row
+        self.home_col = home_col
+        self.scared = False
+        self.dead = False
+        self.move_counter = 0
+
+    def reset(self) -> None:
+        self.scared = False
+        self.dead = False
+        self.dr = 0
+        self.dc = 0
+
+    # ── BFS helper ────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _bfs_next(
+        grid: List[List[int]],
+        rows: int,
+        cols: int,
+        start: Tuple[int, int],
+        target: Tuple[int, int],
+    ) -> Optional[Tuple[int, int]]:
+        """
+        Return the *next cell* from start toward target via BFS.
+        Passable cells: anything that is not a wall (grid value != 1).
+        Returns None if target is unreachable or equals start.
+        """
+        if start == target:
+            return None
+        came_from: Dict[Tuple[int, int], Tuple[int, int]] = {start: start}
+        q: deque = deque([start])
+        found = False
+        while q:
+            cur = q.popleft()
+            if cur == target:
+                found = True
+                break
+            r, c = cur
+            for dr, dc in Ghost.DIRS:
+                nr, nc = r + dr, c + dc
+                if not (0 <= nr < rows and 0 <= nc < cols):
+                    continue
+                if grid[nr][nc] == 1:
+                    continue
+                nxt = (nr, nc)
+                if nxt in came_from:
+                    continue
+                came_from[nxt] = cur
+                q.append(nxt)
+        if not found:
+            return None
+        # Walk back to find the step right after start
+        cur = target
+        while came_from[cur] != start:
+            cur = came_from[cur]
+        return cur
+
+    # ── Move ──────────────────────────────────────────────────────────────────
+
+    def move(
+        self,
+        grid: List[List[int]],
+        rows: int,
+        cols: int,
+        player_positions: List[Tuple[int, int]],
+        scatter_mode: bool,
+    ) -> None:
+        """Advance the ghost by one step (respects speed throttle)."""
+        # Speed: dead=fast(every 2), scared=slow(every 3), normal=every frame
+        speed_every = 2 if self.dead else (3 if self.scared else 1)
+        self.move_counter = (self.move_counter + 1) % speed_every
+        if self.move_counter != 0:
+            return
+
+        r, c = self.row, self.col
+
+        # ── Frightened: random walk, prefer not to reverse ────────────────
+        if self.scared and not self.dead:
+            no_rev = [
+                (dr, dc) for dr, dc in Ghost.DIRS
+                if not (dr == -self.dr and dc == -self.dc)
+                and 0 <= r + dr < rows and 0 <= c + dc < cols
+                and grid[r + dr][c + dc] != 1
+            ]
+            options = no_rev or [
+                (dr, dc) for dr, dc in Ghost.DIRS
+                if 0 <= r + dr < rows and 0 <= c + dc < cols
+                and grid[r + dr][c + dc] != 1
+            ]
+            if options:
+                self.dr, self.dc = random.choice(options)
+            self.row += self.dr
+            self.col += self.dc
+            return
+
+        # ── Choose BFS target ────────────────────────────────────────────────
+        if self.dead:
+            bfs_target = (self.home_row, self.home_col)
+        elif scatter_mode or not player_positions:
+            bfs_target = self.scatter_target
+        else:
+            # Chase nearest living player
+            bfs_target = min(
+                player_positions,
+                key=lambda p: abs(p[0] - r) + abs(p[1] - c),
+            )
+
+        # ── BFS step ─────────────────────────────────────────────────────────
+        nxt = Ghost._bfs_next(grid, rows, cols, (r, c), bfs_target)
+        if nxt is not None:
+            self.dr = nxt[0] - r
+            self.dc = nxt[1] - c
+            self.row, self.col = nxt
+        else:
+            # Fallback: greedy pick (handles dead ghost already at home)
+            options = [
+                (dr, dc) for dr, dc in Ghost.DIRS
+                if 0 <= r + dr < rows and 0 <= c + dc < cols
+                and grid[r + dr][c + dc] != 1
+            ]
+            if options:
+                self.dr, self.dc = random.choice(options)
+                self.row += self.dr
+                self.col += self.dc
+
+        # Revive dead ghost once it reaches home
+        if self.dead and self.row == self.home_row and self.col == self.home_col:
+            self.dead = False
+            self.scared = False
+
+        # Horizontal tunnel wrap
+        self.col %= cols
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  PacManGame  — merged class
+# ══════════════════════════════════════════════════════════════════════════════
 
 class PacManGame:
     NAME = "Pac-Man"
 
     # ── Map template (20 × 20) ────────────────────────────────────────────────
-    # 1=wall  2=pellet  3=power  0=empty  4=ghost house interior
-    _MAP_TEMPLATE = [
+    # 1=wall  2=pellet  3=power-pellet  0=empty  4=ghost-house interior
+    _MAP_TEMPLATE: List[List[int]] = [
         [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
         [1,2,2,2,2,2,2,2,2,1,1,2,2,2,2,2,2,2,2,1],
         [1,3,1,1,2,1,1,1,2,1,1,2,1,1,1,2,1,1,3,1],
@@ -519,78 +720,62 @@ class PacManGame:
 
     ROWS = 20
     COLS = 20
-    CELL = 2        # chars wide per cell (doubled for readability)
+    CELL = 2        # terminal chars per maze cell (doubled for readability)
     TICK = 0.13     # seconds per frame
 
-    # Ghost colours (curses colour pair indices allocated in _init_colors)
-    GHOST_PAIRS = [3, 4, 5, 6]   # Blinky=3 Pinky=4 Inky=5 Clyde=6
-
-    # Player start positions (row, col) and colour-pair index
-    PLAYER_STARTS = [
-        (16, 9),   # P1
-        (16, 10),  # P2
-        (14, 9),   # P3
-        (14, 10),  # P4
-    ]
-
-    PLAYER_COLORS = [7, 8, 9, 10]  # colour pair indices
+    # Colour-pair indices (allocated in _init_colors)
+    # 1=wall  2=pellet  3=Blinky  4=Pinky  5=Inky  6=Clyde
+    # 7=P1  8=P2  9=P3  10=P4  11=scared-ghost
+    GHOST_PAIRS   = [3, 4, 5, 6]
+    PLAYER_COLORS = [7, 8, 9, 10]
     PLAYER_LABELS = ["P1", "P2", "P3", "P4"]
 
-    # Key bindings: up / down / left / right
-    PLAYER_KEYS = [
+    # (row, col) starting positions for up to 4 players
+    PLAYER_STARTS: List[Tuple[int, int]] = [
+        (16, 9),
+        (16, 10),
+        (14, 9),
+        (14, 10),
+    ]
+
+    # Key bindings: (up, down, left, right)
+    PLAYER_KEYS: List[Tuple[int, int, int, int]] = [
         (curses.KEY_UP,    curses.KEY_DOWN,  curses.KEY_LEFT,  curses.KEY_RIGHT),
         (ord("w"),         ord("s"),         ord("a"),         ord("d")),
         (ord("i"),         ord("k"),         ord("j"),         ord("l")),
         (ord("8"),         ord("5"),         ord("4"),         ord("6")),
     ]
 
-    # ── Ghost AI ──────────────────────────────────────────────────────────────
+    # Ghost definitions: (start_row, start_col, scatter_target, color_pair)
+    _GHOST_DEFS: List[Tuple[int, int, Tuple[int, int], int]] = [
+        (9,  9,  (0,  COLS - 1), 3),   # Blinky — red
+        (9,  10, (0,  0),        4),   # Pinky  — magenta
+        (10, 9,  (ROWS - 1, COLS - 1), 5),  # Inky  — cyan
+        (10, 10, (ROWS - 1, 0),  6),   # Clyde  — yellow
+    ]
 
-    class Ghost:
-        def __init__(self, row, col, scatter_target, color_pair, home_row=9, home_col=9):
-            self.row = row
-            self.col = col
-            self.dr = 0
-            self.dc = 0
-            self.scatter_target = scatter_target   # (row, col) corner
-            self.color_pair = color_pair
-            self.home_row = home_row
-            self.home_col = home_col
-            self.scared = False
-            self.dead = False
-            self.move_counter = 0
+    # Scatter mode: alternate scatter/chase every N ticks
+    _SCATTER_TICKS = 35   # ticks in scatter phase
+    _CHASE_TICKS   = 100  # ticks in chase phase
 
-        def reset(self):
-            self.scared = False
-            self.dead = False
-            self.dr = 0
-            self.dc = 0
-
-    # ── Internal helpers ──────────────────────────────────────────────────────
+    # ── Colour setup ──────────────────────────────────────────────────────────
 
     @staticmethod
-    def _make_map():
-        return [row[:] for row in PacManGame._MAP_TEMPLATE]
-
-    @staticmethod
-    def _init_colors():
+    def _init_colors() -> None:
         curses.start_color()
         curses.use_default_colors()
-        # 1=wall(blue)  2=pellet(white)  3=ghost-Blinky(red)  4=Pinky(magenta)
-        # 5=Inky(cyan)  6=Clyde(yellow)  7=P1(yellow)  8=P2(cyan)
-        # 9=P3(green)  10=P4(magenta)   11=scared-ghost(blue)
         pairs = [
-            (1,  curses.COLOR_BLUE,    -1),
-            (2,  curses.COLOR_WHITE,   -1),
-            (3,  curses.COLOR_RED,     -1),
-            (4,  curses.COLOR_MAGENTA, -1),
-            (5,  curses.COLOR_CYAN,    -1),
-            (6,  curses.COLOR_YELLOW,  -1),
-            (7,  curses.COLOR_YELLOW,  -1),
-            (8,  curses.COLOR_CYAN,    -1),
-            (9,  curses.COLOR_GREEN,   -1),
-            (10, curses.COLOR_MAGENTA, -1),
-            (11, curses.COLOR_BLUE,    -1),
+            (1,  curses.COLOR_BLUE,    -1),   # walls
+            (2,  curses.COLOR_WHITE,   -1),   # pellets
+            (3,  curses.COLOR_RED,     -1),   # Blinky
+            (4,  curses.COLOR_MAGENTA, -1),   # Pinky
+            (5,  curses.COLOR_CYAN,    -1),   # Inky
+            (6,  curses.COLOR_YELLOW,  -1),   # Clyde
+            (7,  curses.COLOR_YELLOW,  -1),   # P1
+            (8,  curses.COLOR_CYAN,    -1),   # P2
+            (9,  curses.COLOR_GREEN,   -1),   # P3
+            (10, curses.COLOR_MAGENTA, -1),   # P4
+            (11, curses.COLOR_BLUE,    -1),   # scared ghost
         ]
         for idx, fg, bg in pairs:
             try:
@@ -598,108 +783,73 @@ class PacManGame:
             except Exception:
                 pass
 
+    # ── Map helpers ───────────────────────────────────────────────────────────
+
     @staticmethod
-    def _can_move(grid, r, c, dr, dc):
+    def _make_map() -> List[List[int]]:
+        return [row[:] for row in PacManGame._MAP_TEMPLATE]
+
+    @staticmethod
+    def _can_move(grid: List[List[int]], r: int, c: int, dr: int, dc: int) -> bool:
         nr, nc = r + dr, c + dc
-        if nr < 0 or nr >= PacManGame.ROWS or nc < 0 or nc >= PacManGame.COLS:
+        if not (0 <= nr < PacManGame.ROWS and 0 <= nc < PacManGame.COLS):
             return False
         return grid[nr][nc] != 1
-
-    @staticmethod
-    def _manhattan(r1, c1, r2, c2):
-        return abs(r1 - r2) + abs(c1 - c2)
-
-    @staticmethod
-    def _ghost_move(ghost, grid, targets):
-        """Move ghost one step using simple chase/scatter/frightened AI."""
-        speed_every = 2 if ghost.dead else (3 if ghost.scared else 1)
-        ghost.move_counter = (ghost.move_counter + 1) % speed_every
-        if ghost.move_counter != 0:
-            return
-
-        r, c = ghost.row, ghost.col
-        dirs = [(-1,0),(1,0),(0,-1),(0,1)]
-        # Don't reverse unless forced
-        no_reverse = [(dr, dc) for dr, dc in dirs if not (dr == -ghost.dr and dc == -ghost.dc)]
-        options = [d for d in no_reverse if PacManGame._can_move(grid, r, c, *d)] or \
-                  [d for d in dirs if PacManGame._can_move(grid, r, c, *d)]
-        if not options:
-            return
-
-        if ghost.dead:
-            # Beeline home
-            best = min(options, key=lambda d: PacManGame._manhattan(r+d[0], c+d[1], ghost.home_row, ghost.home_col))
-            if r == ghost.home_row and c == ghost.home_col:
-                ghost.dead = False
-                ghost.scared = False
-        elif ghost.scared:
-            best = random.choice(options)
-        else:
-            # Chase nearest living target
-            if targets:
-                tr, tc = min(targets, key=lambda t: PacManGame._manhattan(r, c, t[0], t[1]))
-            else:
-                tr, tc = ghost.scatter_target
-            best = min(options, key=lambda d: PacManGame._manhattan(r+d[0], c+d[1], tr, tc))
-
-        ghost.dr, ghost.dc = best
-        ghost.row += best[0]
-        ghost.col += best[1]
-
-        # Tunnel wrap
-        if ghost.col < 0:
-            ghost.col = PacManGame.COLS - 1
-        elif ghost.col >= PacManGame.COLS:
-            ghost.col = 0
 
     # ── Drawing ───────────────────────────────────────────────────────────────
 
     @staticmethod
-    def _draw(stdscr, grid, players, ghosts, scores, lives, level, frigh_timer, num_players, height, width):
+    def _draw(
+        stdscr,
+        grid: List[List[int]],
+        players: List[Dict[str, Any]],
+        ghosts: List[Ghost],
+        scores: List[int],
+        lives: int,
+        level: int,
+        frigh_timer: int,
+        scatter_mode: bool,
+        num_players: int,
+        height: int,
+        width: int,
+    ) -> None:
         stdscr.erase()
         C2 = PacManGame.CELL
 
-        # HUD
-        hud = f" Level:{level}  Lives:{lives}  "
+        # ── HUD (row 0) ───────────────────────────────────────────────────────
+        mode_str = "[SCATTER]" if scatter_mode else "[CHASE]"
+        hud = f" Lv:{level}  Lives:{lives}  {mode_str}"
         for i in range(num_players):
             hud += f"  P{i+1}:{scores[i]}"
         if frigh_timer > 0:
             hud += f"  *** POWER {frigh_timer} ***"
         try:
-            stdscr.addstr(0, 0, hud[:width-1])
+            stdscr.addstr(0, 0, hud[:width - 1])
         except curses.error:
             pass
 
-        # Grid
+        # ── Maze ──────────────────────────────────────────────────────────────
         for r in range(PacManGame.ROWS):
             for c in range(PacManGame.COLS):
-                cell = grid[r][c]
-                draw_row = r + 1
-                draw_col = c * C2
+                cell      = grid[r][c]
+                draw_row  = r + 1
+                draw_col  = c * C2
                 if draw_row >= height or draw_col + C2 >= width:
                     continue
-                if cell == 1:
-                    try:
+                try:
+                    if cell == 1:
                         stdscr.addstr(draw_row, draw_col, "██", curses.color_pair(1))
-                    except curses.error:
-                        pass
-                elif cell == 2:
-                    try:
+                    elif cell == 2:
                         stdscr.addstr(draw_row, draw_col, " ·", curses.color_pair(2))
-                    except curses.error:
-                        pass
-                elif cell == 3:
-                    try:
-                        stdscr.addstr(draw_row, draw_col, " ●", curses.color_pair(2) | curses.A_BOLD)
-                    except curses.error:
-                        pass
-                else:
-                    try:
+                    elif cell == 3:
+                        stdscr.addstr(draw_row, draw_col, " ●",
+                                      curses.color_pair(2) | curses.A_BOLD)
+                    else:
                         stdscr.addstr(draw_row, draw_col, "  ")
-                    except curses.error:
-                        pass
+                except curses.error:
+                    pass
 
-        # Ghosts
+        # ── Ghosts ────────────────────────────────────────────────────────────
         for ghost in ghosts:
             dr = ghost.row + 1
             dc = ghost.col * C2
@@ -712,11 +862,12 @@ class PacManGame:
             else:
                 glyph, pair = " G", ghost.color_pair
             try:
-                stdscr.addstr(dr, dc, glyph, curses.color_pair(pair) | curses.A_BOLD)
+                stdscr.addstr(dr, dc, glyph,
+                               curses.color_pair(pair) | curses.A_BOLD)
             except curses.error:
                 pass
 
-        # Players
+        # ── Players ───────────────────────────────────────────────────────────
         for i, p in enumerate(players):
             if not p["alive"]:
                 continue
@@ -724,18 +875,18 @@ class PacManGame:
             dc = p["col"] * C2
             if dr >= height or dc + C2 >= width:
                 continue
-            label = f">{i+1}"
             try:
-                stdscr.addstr(dr, dc, label, curses.color_pair(PacManGame.PLAYER_COLORS[i]) | curses.A_BOLD)
+                stdscr.addstr(dr, dc, f">{i + 1}",
+                               curses.color_pair(PacManGame.PLAYER_COLORS[i]) | curses.A_BOLD)
             except curses.error:
                 pass
 
-        # Footer
+        # ── Footer ────────────────────────────────────────────────────────────
         footer_row = PacManGame.ROWS + 1
         if footer_row < height:
             ctrl = "P1:Arrows  P2:WASD  P3:IJKL  P4:8456  Q:quit"
             try:
-                stdscr.addstr(footer_row, 0, ctrl[:width-1], curses.A_DIM)
+                stdscr.addstr(footer_row, 0, ctrl[:width - 1], curses.A_DIM)
             except curses.error:
                 pass
 
@@ -751,14 +902,16 @@ class PacManGame:
         stdscr.keypad(True)
 
         height, width = stdscr.getmaxyx()
-
         grid = cls._make_map()
 
-        # Count total pellets
-        total_pellets = sum(1 for r in range(cls.ROWS) for c in range(cls.COLS) if grid[r][c] in (2, 3))
+        total_pellets = sum(
+            1 for r in range(cls.ROWS)
+            for c in range(cls.COLS)
+            if grid[r][c] in (2, 3)
+        )
 
-        # Init players
-        players = []
+        # ── Players ───────────────────────────────────────────────────────────
+        players: List[Dict[str, Any]] = []
         for i in range(num_players):
             sr, sc = cls.PLAYER_STARTS[i]
             players.append({
@@ -766,23 +919,21 @@ class PacManGame:
                 "dr": 0, "dc": 0,
                 "next_dr": 0, "next_dc": 1 if i % 2 == 0 else -1,
                 "alive": True,
-                "move_timer": 0,
             })
 
         scores = [0] * 4
 
-        # Init ghosts (Blinky=red Pinky=magenta Inky=cyan Clyde=yellow)
-        ghosts = [
-            cls.Ghost(9,  9,  (0,  cls.COLS-1), 3, home_row=9,  home_col=9),
-            cls.Ghost(9,  10, (0,  0),           4, home_row=9,  home_col=10),
-            cls.Ghost(10, 9,  (cls.ROWS-1, cls.COLS-1), 5, home_row=10, home_col=9),
-            cls.Ghost(10, 10, (cls.ROWS-1, 0),   6, home_row=10, home_col=10),
-        ]
+        # ── Ghosts ────────────────────────────────────────────────────────────
+        ghosts: List[Ghost] = []
+        for row, col, scatter_t, cp in cls._GHOST_DEFS:
+            ghosts.append(Ghost(row, col, scatter_t, cp, row, col))
 
         lives = 3
         level = 1
-        frigh_timer = 0
+        frigh_timer  = 0
         pellets_eaten = 0
+        scatter_timer = cls._SCATTER_TICKS
+        scatter_mode  = True
         running = True
         game_over = False
         win = False
@@ -812,13 +963,20 @@ class PacManGame:
                 continue
             last_tick = now
 
+            # ── Scatter / Chase phase toggle ──────────────────────────────────
+            if frigh_timer == 0:          # don't tick scatter during frightened
+                scatter_timer -= 1
+                if scatter_timer <= 0:
+                    scatter_mode  = not scatter_mode
+                    scatter_timer = cls._SCATTER_TICKS if scatter_mode else cls._CHASE_TICKS
+
             # ── Move players ──────────────────────────────────────────────────
             for i, p in enumerate(players):
                 if not p["alive"]:
                     continue
                 r, c = p["row"], p["col"]
 
-                # Try queued direction first, then keep current
+                # Try queued direction first, then current
                 for dr, dc in [(p["next_dr"], p["next_dc"]), (p["dr"], p["dc"])]:
                     if dr == 0 and dc == 0:
                         continue
@@ -831,7 +989,7 @@ class PacManGame:
                 if grid[nr][nc] != 1:
                     p["row"], p["col"] = nr, nc
 
-                # Eat pellet
+                # Eat pellets
                 cell = grid[p["row"]][p["col"]]
                 if cell == 2:
                     grid[p["row"]][p["col"]] = 0
@@ -847,10 +1005,13 @@ class PacManGame:
                             g.scared = True
 
             # ── Move ghosts ───────────────────────────────────────────────────
-            living_targets = [(p["row"], p["col"]) for p in players if p["alive"]]
+            living_positions = [
+                (p["row"], p["col"]) for p in players if p["alive"]
+            ]
             for g in ghosts:
-                cls._ghost_move(g, grid, living_targets)
+                g.move(grid, cls.ROWS, cls.COLS, living_positions, scatter_mode)
 
+            # Tick down frightened timer
             if frigh_timer > 0:
                 frigh_timer -= 1
                 if frigh_timer == 0:
@@ -864,19 +1025,21 @@ class PacManGame:
                 for g in ghosts:
                     if g.row == p["row"] and g.col == p["col"]:
                         if g.scared and not g.dead:
-                            g.dead = True
+                            # Player eats ghost
+                            g.dead   = True
                             g.scared = False
                             scores[i] += 200
                         elif not g.dead:
+                            # Ghost catches player
                             p["alive"] = False
-                            if i == 0:   # only P1 controls lives
+                            if i == 0:     # lives tracked by P1
                                 lives -= 1
 
-            # Respawn P1 on death
+            # Respawn P1 on remaining lives
             if not players[0]["alive"] and lives > 0:
+                sr, sc = cls.PLAYER_STARTS[0]
                 players[0].update({
-                    "row": cls.PLAYER_STARTS[0][0],
-                    "col": cls.PLAYER_STARTS[0][1],
+                    "row": sr, "col": sc,
                     "dr": 0, "dc": 0,
                     "next_dr": 0, "next_dc": 1,
                     "alive": True,
@@ -885,7 +1048,7 @@ class PacManGame:
                     g.reset()
                     g.row, g.col = g.home_row, g.home_col
 
-            # Win / lose
+            # ── Win / lose ────────────────────────────────────────────────────
             if pellets_eaten >= total_pellets:
                 win = True
                 scores = [s + 500 for s in scores]
@@ -897,16 +1060,19 @@ class PacManGame:
 
             # ── Draw ──────────────────────────────────────────────────────────
             height, width = stdscr.getmaxyx()
-            cls._draw(stdscr, grid, players, ghosts, scores, lives, level, frigh_timer, num_players, height, width)
+            cls._draw(
+                stdscr, grid, players, ghosts, scores, lives, level,
+                frigh_timer, scatter_mode, num_players, height, width,
+            )
 
-        # End screen
+        # ── End screen ────────────────────────────────────────────────────────
         stdscr.nodelay(False)
         stdscr.erase()
         msg = "YOU WIN! 🎉" if win else "GAME OVER"
         try:
             stdscr.addstr(2, 2, msg, curses.A_BOLD)
             for i in range(num_players):
-                stdscr.addstr(4 + i, 2, f"  P{i+1}: {scores[i]} pts")
+                stdscr.addstr(4 + i, 2, f"  P{i + 1}: {scores[i]} pts")
             stdscr.addstr(4 + num_players + 1, 2, "Press any key to continue.")
         except curses.error:
             pass
@@ -915,30 +1081,30 @@ class PacManGame:
 
         return {
             "scores": scores[:num_players],
-            "win": win,
+            "win":    win,
             "players": num_players,
         }
 
-    # ── Public interface (matches other game classes) ─────────────────────────
+    # ── Public interface ──────────────────────────────────────────────────────
 
     @classmethod
     def prompt_choice(cls) -> dict:
-        """Ask how many players (2–4), then launch the curses game."""
-        cprint("\n  🎮  Pac-Man — Local Multiplayer (up to 4 players)", C.YELLOW + C.BOLD)
+        """Ask how many players (1–4), then launch the curses game."""
+        cprint("\n  🎮  Pac-Man — Local Multiplayer (1–4 players)", C.YELLOW + C.BOLD)
         cprint("  All players share this terminal.\n", C.DIM)
         cprint("  Controls:", C.WHITE)
         cprint("    P1  Arrow keys     P2  W/A/S/D", C.WHITE)
         cprint("    P3  I/J/K/L        P4  8/4/5/6  (number row)", C.WHITE)
 
         while True:
-            cprint("\n  How many players? [2 / 3 / 4]", C.CYAN)
+            cprint("\n  How many players? [1 / 2 / 3 / 4]", C.CYAN)
             raw = input(f"  {C.BOLD}> {C.RESET}").strip()
-            if raw in ("2", "3", "4"):
+            if raw in ("1", "2", "3", "4"):
                 num_players = int(raw)
                 break
-            cprint("  ⚠  Enter 2, 3, or 4.", C.YELLOW)
+            cprint("  ⚠  Enter 1, 2, 3, or 4.", C.YELLOW)
 
-        cprint(f"\n  Starting Pac-Man with {num_players} players...", C.GREEN)
+        cprint(f"\n  Starting Pac-Man with {num_players} player(s)...", C.GREEN)
         cprint("  (Press Q in-game to quit early)", C.DIM)
         time.sleep(1)
 
@@ -953,13 +1119,11 @@ class PacManGame:
             return {"scores": [0] * num_players, "win": False, "players": num_players}
 
     @staticmethod
-    def resolve(choices: dict) -> dict:
+    def resolve(choices: Dict[str, Any]) -> dict:
         """choices = {player_name: result_dict}. Highest score wins."""
-        player_scores = {}
+        player_scores: Dict[str, int] = {}
         for player, result in choices.items():
             if isinstance(result, dict):
-                # result["scores"] is a list of per-player scores; take the max
-                # (in multiplayer the host bundles all scores together)
                 sc = result.get("scores", [0])
                 player_scores[player] = max(sc) if sc else 0
             else:
@@ -969,24 +1133,49 @@ class PacManGame:
         winners = [p for p, s in player_scores.items() if s == max_score and max_score > 0]
         return {
             "player_scores": player_scores,
-            "winners": winners,
-            "high_score": max_score,
+            "winners":       winners,
+            "high_score":    max_score,
         }
 
     @staticmethod
     def format_result(result: dict, my_name: str) -> str:
         player_scores = result["player_scores"]
-        winners = result["winners"]
+        winners       = result["winners"]
         lines = [f"\n  {C.BOLD}── Pac-Man Results ──{C.RESET}\n"]
         for player, score in sorted(player_scores.items(), key=lambda x: -x[1]):
-            tag = " ← you" if player == my_name else ""
+            tag  = " ← you" if player == my_name else ""
             mark = f"{C.YELLOW}🏆" if player in winners else f"{C.WHITE}👾"
-            lines.append(f"  {mark}{C.RESET}  {player}: {C.BOLD}{score}{C.RESET} pts{C.DIM}{tag}{C.RESET}")
+            lines.append(
+                f"  {mark}{C.RESET}  {player}: {C.BOLD}{score}{C.RESET} pts"
+                f"{C.DIM}{tag}{C.RESET}"
+            )
         if my_name in winners:
             lines.append(f"\n  {C.GREEN}{C.BOLD}🎉 You had the highest Pac-Man score!{C.RESET}")
         else:
             lines.append(f"\n  {C.RED}Better luck next maze!{C.RESET}")
         return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Backwards-compat alias  (drop-in replacement for the old PacmanChase)
+# ══════════════════════════════════════════════════════════════════════════════
+
+PacmanChase = PacManGame
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Stand-alone entry point
+# ══════════════════════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    result = PacManGame.prompt_choice()
+    scores = result.get("scores", [])
+    won    = result.get("win", False)
+    print("\nGame finished.")
+    for i, s in enumerate(scores, 1):
+        print(f"  P{i}: {s} pts")
+    if won:
+        print("All pellets cleared — you win! 🎉")
 
 
 # ── Game Registry ──────────────────────────────────────────────────────────────
