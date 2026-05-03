@@ -571,351 +571,9 @@ class SnakeGame:
         return "\n".join(lines)
 
 
-# ── Pacman Chase (single-player timed run) ─────────────────────────────────────
-
-class PacmanChase:
-    """
-    Single-player curses game. Each player runs it locally; scores are compared.
-    3 lives, 45-second timer. WASD / arrow keys.
-    """
-    NAME = "Pacman Chase"
-    GRID_WIDTH = 21
-    GRID_HEIGHT = 13
-    TICK_RATE = 0.15
-    MAX_LIVES = 3
-    GAME_DURATION = 45
-    PELLET_COUNT = 14
-
-    LAYOUT = [
-        [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
-        [1,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,1],
-        [1,0,1,1,0,1,1,1,0,0,0,0,0,1,1,1,0,1,1,0,1],
-        [1,0,1,0,0,0,0,1,0,1,1,1,0,1,0,0,0,0,1,0,1],
-        [1,0,1,0,1,1,0,1,0,0,0,0,0,1,0,1,1,0,1,0,1],
-        [1,0,0,0,1,0,0,0,0,1,0,1,0,0,0,0,1,0,0,0,1],
-        [1,1,1,0,1,0,1,1,0,0,0,0,0,1,1,0,1,0,1,1,1],
-        [1,0,0,0,1,0,0,0,0,1,0,1,0,0,0,0,1,0,0,0,1],
-        [1,0,1,0,1,1,0,1,0,0,0,0,0,1,0,1,1,0,1,0,1],
-        [1,0,1,0,0,0,0,1,0,1,1,1,0,1,0,0,0,0,1,0,1],
-        [1,0,1,1,0,1,1,1,0,0,0,0,0,1,1,1,0,1,1,0,1],
-        [1,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,1],
-        [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
-    ]
-
-    DIRECTION_KEYS_INIT = False
-    DIRECTION_KEYS: Dict[int, Tuple[int, int]] = {}
-
-    @classmethod
-    def _init_direction_keys(cls) -> None:
-        if cls.DIRECTION_KEYS_INIT:
-            return
-        cls.DIRECTION_KEYS = {
-            ord("w"): (0, -1), ord("W"): (0, -1), curses.KEY_UP: (0, -1),
-            ord("s"): (0, 1),  ord("S"): (0, 1),  curses.KEY_DOWN: (0, 1),
-            ord("a"): (-1, 0), ord("A"): (-1, 0), curses.KEY_LEFT: (-1, 0),
-            ord("d"): (1, 0),  ord("D"): (1, 0),  curses.KEY_RIGHT: (1, 0),
-        }
-        cls.DIRECTION_KEYS_INIT = True
-
-    @staticmethod
-    def _open_cells() -> List[Tuple[int, int]]:
-        return [
-            (x, y)
-            for y, row in enumerate(PacmanChase.LAYOUT)
-            for x, cell in enumerate(row)
-            if cell == 0
-        ]
-
-    @staticmethod
-    def _is_wall(x: int, y: int) -> bool:
-        if not (0 <= x < PacmanChase.GRID_WIDTH and 0 <= y < PacmanChase.GRID_HEIGHT):
-            return True
-        return PacmanChase.LAYOUT[y][x] == 1
-
-    @staticmethod
-    def _spawn_positions(
-        open_cells: List[Tuple[int, int]],
-    ) -> Tuple[int, int, List[Tuple[int, int]]]:
-        cx, cy = PacmanChase.GRID_WIDTH // 2, PacmanChase.GRID_HEIGHT // 2
-        open_sorted = sorted(open_cells, key=lambda c: abs(c[0] - cx) + abs(c[1] - cy))
-        px, py = open_sorted[0]
-        far_cells = sorted(
-            open_cells,
-            key=lambda c: abs(c[0] - px) + abs(c[1] - py),
-            reverse=True,
-        )
-        ghosts: List[Tuple[int, int]] = []
-        used = {(px, py)}
-        for cell in far_cells:
-            if cell in used:
-                continue
-            ghosts.append(cell)
-            used.add(cell)
-            if len(ghosts) == 2:
-                break
-        while len(ghosts) < 2:
-            ghosts.append(open_cells[0])
-        return px, py, ghosts
-
-    @staticmethod
-    def _bfs_next_step(
-        start: Tuple[int, int],
-        target: Tuple[int, int],
-    ) -> Optional[Tuple[int, int]]:
-        if start == target:
-            return None
-        from collections import deque
-        came_from: Dict[Tuple[int, int], Tuple[int, int]] = {start: start}
-        q: "deque[Tuple[int, int]]" = deque([start])
-        found = False
-        while q:
-            cur = q.popleft()
-            if cur == target:
-                found = True
-                break
-            for dx, dy in [(0, -1), (0, 1), (-1, 0), (1, 0)]:
-                nxt = (cur[0] + dx, cur[1] + dy)
-                if nxt in came_from:
-                    continue
-                if PacmanChase._is_wall(*nxt):
-                    continue
-                came_from[nxt] = cur
-                q.append(nxt)
-        if not found:
-            return None
-        cur = target
-        while came_from[cur] != start:
-            cur = came_from[cur]
-        return cur
-
-    @staticmethod
-    def _move_ghost(
-        ghost: Tuple[int, int],
-        target: Tuple[int, int],
-    ) -> Tuple[int, int]:
-        if random.random() < 0.15:
-            options = []
-            for dx, dy in [(0, -1), (0, 1), (-1, 0), (1, 0)]:
-                cand = (ghost[0] + dx, ghost[1] + dy)
-                if not PacmanChase._is_wall(*cand):
-                    options.append(cand)
-            if options:
-                return random.choice(options)
-        nxt = PacmanChase._bfs_next_step(ghost, target)
-        return nxt if nxt is not None else ghost
-
-    @staticmethod
-    def _run(stdscr) -> int:
-        PacmanChase._init_direction_keys()
-        curses.curs_set(0)
-        stdscr.nodelay(True)
-        stdscr.keypad(True)
-        stdscr.timeout(int(PacmanChase.TICK_RATE * 1000))
-
-        open_cells = PacmanChase._open_cells()
-        pacman_x, pacman_y, ghosts = PacmanChase._spawn_positions(open_cells)
-        direction = (0, 0)
-        queued = (0, 0)
-        score = 0
-        lives = PacmanChase.MAX_LIVES
-
-        occupied = {(pacman_x, pacman_y)} | set(ghosts)
-        pellet_choices = [c for c in open_cells if c not in occupied]
-        random.shuffle(pellet_choices)
-        pellets = set(pellet_choices[:PacmanChase.PELLET_COUNT])
-
-        start_t = time.time()
-        ghost_tick = 0
-        quit_pressed = False
-        respawning = False
-        respawn_until = 0.0
-
-        def render(msg: str = "") -> None:
-            stdscr.erase()
-            for y, row in enumerate(PacmanChase.LAYOUT):
-                line_chars: List[str] = []
-                for x, cell in enumerate(row):
-                    if cell == 1:
-                        line_chars.append("█")
-                    elif (x, y) == (pacman_x, pacman_y):
-                        line_chars.append("C")
-                    elif (x, y) in ghosts:
-                        line_chars.append("M")
-                    elif (x, y) in pellets:
-                        line_chars.append("·")
-                    else:
-                        line_chars.append(" ")
-                try:
-                    stdscr.addstr(y, 0, "".join(line_chars))
-                except curses.error:
-                    pass
-            time_left = max(0, int(PacmanChase.GAME_DURATION - (time.time() - start_t)))
-            hearts = "♥ " * lives + "  " * (PacmanChase.MAX_LIVES - lives)
-            hud = (
-                f" Score: {score:<5}  Lives: {hearts.strip()}  "
-                f"Time: {time_left:>2}s   [W=Up  S=Down  A=Left  D=Right]  [Q to quit]"
-            )
-            try:
-                stdscr.addstr(PacmanChase.GRID_HEIGHT, 0, hud)
-            except curses.error:
-                pass
-            if msg:
-                try:
-                    stdscr.addstr(PacmanChase.GRID_HEIGHT + 1, 0, msg)
-                except curses.error:
-                    pass
-            stdscr.refresh()
-
-        while True:
-            if quit_pressed:
-                break
-            if lives <= 0:
-                break
-            if time.time() - start_t >= PacmanChase.GAME_DURATION:
-                break
-
-            if respawning and time.time() < respawn_until:
-                render("  💀 You were caught! Respawning...")
-                drain_key = stdscr.getch()
-                while drain_key != -1:
-                    drain_key = stdscr.getch()
-                continue
-            if respawning and time.time() >= respawn_until:
-                respawning = False
-
-            key = stdscr.getch()
-            if key in (ord("q"), ord("Q")):
-                quit_pressed = True
-                continue
-            if key in PacmanChase.DIRECTION_KEYS:
-                queued = PacmanChase.DIRECTION_KEYS[key]
-
-            if queued != (0, 0):
-                tx, ty = pacman_x + queued[0], pacman_y + queued[1]
-                if not PacmanChase._is_wall(tx, ty):
-                    direction = queued
-                    queued = (0, 0)
-
-            if direction != (0, 0):
-                nx = pacman_x + direction[0]
-                ny = pacman_y + direction[1]
-                if not PacmanChase._is_wall(nx, ny):
-                    pacman_x, pacman_y = nx, ny
-
-            if (pacman_x, pacman_y) in pellets:
-                pellets.discard((pacman_x, pacman_y))
-                score += 10
-                forbidden = {(pacman_x, pacman_y)} | set(ghosts) | pellets
-                empty = [c for c in open_cells if c not in forbidden]
-                if empty:
-                    pellets.add(random.choice(empty))
-
-            ghost_tick += 1
-            if ghost_tick % 2 == 0:
-                new_ghosts: List[Tuple[int, int]] = []
-                for g in ghosts:
-                    new_ghosts.append(PacmanChase._move_ghost(g, (pacman_x, pacman_y)))
-                ghosts = new_ghosts
-
-            if (pacman_x, pacman_y) in set(ghosts):
-                lives -= 1
-                if lives > 0:
-                    pacman_x, pacman_y, ghosts = PacmanChase._spawn_positions(open_cells)
-                    direction = (0, 0)
-                    queued = (0, 0)
-                    respawning = True
-                    respawn_until = time.time() + 1.0
-                    render("  💀 You were caught! Respawning...")
-                    continue
-
-            render()
-
-        if lives <= 0:
-            final_msg = f"  Game over! Final score: {score}.  Press any key."
-        elif quit_pressed:
-            final_msg = f"  Quit. Final score: {score}.  Press any key."
-        else:
-            final_msg = f"  Time's up! Final score: {score}.  Press any key."
-        render(final_msg)
-        stdscr.nodelay(False)
-        stdscr.timeout(-1)
-        stdscr.getch()
-        return score
-
-    @staticmethod
-    def prompt_choice() -> int:
-        cprint("\n  Launching Pacman Chase...", C.CYAN)
-        cprint("  Controls: W=Up  S=Down  A=Left  D=Right", C.WHITE)
-        cprint("  Eat · pellets, avoid M ghosts.  3 lives, 45 seconds.  Highest score wins!", C.WHITE)
-        time.sleep(1.2)
-
-        if not HAS_CURSES or not sys.stdin.isatty() or not sys.stdout.isatty():
-            cprint("  ⚠  Interactive terminal not available here. Scoring 0 for this round.", C.YELLOW)
-            return 0
-
-        try:
-            score = curses.wrapper(PacmanChase._run)
-            return int(score)
-        except curses.error as e:
-            cprint(f"  ⚠  Curses error: {e}. Scoring 0 for this round.", C.YELLOW)
-            return 0
-        except (RuntimeError, OSError) as e:
-            cprint(f"  ⚠  Pacman couldn't run ({e}). Scoring 0 for this round.", C.YELLOW)
-            return 0
-
-    @staticmethod
-    def resolve(choices: Dict[str, int]) -> dict:
-        scores: Dict[str, int] = {}
-        for p, c in choices.items():
-            try:
-                scores[p] = int(c)
-            except (TypeError, ValueError):
-                scores[p] = 0
-        if scores:
-            max_score = max(scores.values())
-            winners = [p for p, s in scores.items() if s == max_score and max_score > 0]
-        else:
-            winners = []
-        return {"scores": scores, "winners": winners}
-
-    @staticmethod
-    def format_result(result: dict, my_name: str) -> str:
-        scores = result["scores"]
-        winners = result["winners"]
-        lines = [f"\n  👾  {C.BOLD}Pacman Chase Results{C.RESET}\n"]
-        for player, sc in sorted(scores.items(), key=lambda kv: -kv[1]):
-            tag = " ← you" if player == my_name else ""
-            mark = f"{C.GREEN}🏆" if player in winners else f"{C.YELLOW}👾"
-            lines.append(
-                f"  {mark}{C.RESET}  {player}: {C.BOLD}{sc}{C.RESET} pts"
-                f"{C.DIM}{tag}{C.RESET}"
-            )
-        if not winners:
-            lines.append(f"\n  {C.YELLOW}No one scored this round!{C.RESET}")
-        elif my_name in winners:
-            lines.append(f"\n  {C.GREEN}{C.BOLD}🏆 You had the highest score!{C.RESET}")
-        else:
-            lines.append(f"\n  {C.RED}Better luck next time!{C.RESET}")
-        return "\n".join(lines)
-
-
-# ── Pac-Man (4-player turn-based, WASD only) ───────────────────────────────────
-#
-#  Up to 4 players take turns playing the SAME maze one at a time.
-#  Controls: WASD only (W=up, A=left, S=down, D=right).
-#  The WASD controls are always shown at the bottom of the screen during play.
-#  After all players have had their turn, scores are compared and the winner
-#  is whoever got the most points.
-#
-#  Scoring:
-#    Pellet         10 pts
-#    Power pellet   50 pts
-#    Ghost eat     200 pts
-#    Level clear   500 pts bonus
-
 class PacManGame:
     NAME = "Pac-Man (4-Player Turns)"
-
+ 
     # Map template (20 × 20) — 1=wall  2=pellet  3=power  0=empty  4=ghost house
     _MAP_TEMPLATE = [
         [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
@@ -939,20 +597,20 @@ class PacManGame:
         [1,2,2,2,2,1,2,2,2,1,1,2,2,2,1,2,2,2,2,1],
         [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
     ]
-
+ 
     ROWS = 20
     COLS = 20
     CELL = 2      # chars wide per cell
     TICK = 0.13   # seconds per frame
-
+ 
     GHOST_PAIRS = [3, 4, 5, 6]  # colour pair indices for ghosts
-
+ 
     # Player start position (row, col) — all players start from the same spot
     PLAYER_START = (16, 9)
-
+ 
     PLAYER_COLORS = [7, 8, 9, 10]
     PLAYER_LABELS = ["P1", "P2", "P3", "P4"]
-
+ 
     # WASD only — no arrow keys, no IJKL, no numpad
     WASD_KEYS = {
         ord("w"): (-1, 0), ord("W"): (-1, 0),   # up
@@ -960,9 +618,9 @@ class PacManGame:
         ord("a"): (0, -1), ord("A"): (0, -1),   # left
         ord("d"): (0, 1),  ord("D"): (0, 1),    # right
     }
-
+ 
     # ── Ghost AI ─────────────────────────────────────────────────────────────
-
+ 
     class Ghost:
         def __init__(self, row, col, scatter_target, color_pair, home_row=9, home_col=9):
             self.row = row
@@ -976,19 +634,19 @@ class PacManGame:
             self.scared = False
             self.dead = False
             self.move_counter = 0
-
+ 
         def reset(self):
             self.scared = False
             self.dead = False
             self.dr = 0
             self.dc = 0
-
+ 
     # ── Internal helpers ──────────────────────────────────────────────────────
-
+ 
     @staticmethod
     def _make_map():
         return [row[:] for row in PacManGame._MAP_TEMPLATE]
-
+ 
     @staticmethod
     def _init_colors():
         curses.start_color()
@@ -1011,25 +669,25 @@ class PacManGame:
                 curses.init_pair(idx, fg, bg)
             except Exception:
                 pass
-
+ 
     @staticmethod
     def _can_move(grid, r, c, dr, dc):
         nr, nc = r + dr, c + dc
         if nr < 0 or nr >= PacManGame.ROWS or nc < 0 or nc >= PacManGame.COLS:
             return False
         return grid[nr][nc] != 1
-
+ 
     @staticmethod
     def _manhattan(r1, c1, r2, c2):
         return abs(r1 - r2) + abs(c1 - c2)
-
+ 
     @staticmethod
     def _ghost_move(ghost, grid, target_row, target_col):
         speed_every = 2 if ghost.dead else (3 if ghost.scared else 1)
         ghost.move_counter = (ghost.move_counter + 1) % speed_every
         if ghost.move_counter != 0:
             return
-
+ 
         r, c = ghost.row, ghost.col
         dirs = [(-1, 0), (1, 0), (0, -1), (0, 1)]
         no_reverse = [(dr, dc) for dr, dc in dirs if not (dr == -ghost.dr and dc == -ghost.dc)]
@@ -1037,7 +695,7 @@ class PacManGame:
                   [d for d in dirs if PacManGame._can_move(grid, r, c, *d)]
         if not options:
             return
-
+ 
         if ghost.dead:
             best = min(options, key=lambda d: PacManGame._manhattan(r+d[0], c+d[1], ghost.home_row, ghost.home_col))
             if r == ghost.home_row and c == ghost.home_col:
@@ -1047,34 +705,35 @@ class PacManGame:
             best = random.choice(options)
         else:
             best = min(options, key=lambda d: PacManGame._manhattan(r+d[0], c+d[1], target_row, target_col))
-
+ 
         ghost.dr, ghost.dc = best
         ghost.row += best[0]
         ghost.col += best[1]
-
+ 
         # Tunnel wrap
         if ghost.col < 0:
             ghost.col = PacManGame.COLS - 1
         elif ghost.col >= PacManGame.COLS:
             ghost.col = 0
-
+ 
     # ── Drawing ───────────────────────────────────────────────────────────────
-
+ 
     @staticmethod
     def _draw(stdscr, grid, player, ghosts, score, lives, level, frigh_timer,
               player_idx, player_label, height, width):
         stdscr.erase()
         C2 = PacManGame.CELL
-
+ 
         # HUD
-        hud = f" {player_label} | Level:{level}  Lives:{lives}  Score:{score}"
+        hearts = "♥" * lives + "♡" * (3 - lives)
+        hud = f" {player_label} | Level:{level}  Lives: {hearts}  Score:{score}"
         if frigh_timer > 0:
             hud += f"  *** POWER {frigh_timer} ***"
         try:
             stdscr.addstr(0, 0, hud[:width-1])
         except curses.error:
             pass
-
+ 
         # Grid
         for r in range(PacManGame.ROWS):
             for c in range(PacManGame.COLS):
@@ -1103,7 +762,7 @@ class PacManGame:
                         stdscr.addstr(draw_row, draw_col, "  ")
                     except curses.error:
                         pass
-
+ 
         # Ghosts
         for ghost in ghosts:
             dr = ghost.row + 1
@@ -1120,7 +779,7 @@ class PacManGame:
                 stdscr.addstr(dr, dc, glyph, curses.color_pair(pair) | curses.A_BOLD)
             except curses.error:
                 pass
-
+ 
         # Player
         if player["alive"]:
             dr = player["row"] + 1
@@ -1132,7 +791,7 @@ class PacManGame:
                                   curses.color_pair(PacManGame.PLAYER_COLORS[player_idx]) | curses.A_BOLD)
                 except curses.error:
                     pass
-
+ 
         # Footer — always show WASD controls
         footer_row = PacManGame.ROWS + 1
         if footer_row < height:
@@ -1141,11 +800,11 @@ class PacManGame:
                 stdscr.addstr(footer_row, 0, ctrl[:width-1], curses.A_BOLD)
             except curses.error:
                 pass
-
+ 
         stdscr.refresh()
-
+ 
     # ── Single-player turn on the shared maze ─────────────────────────────────
-
+ 
     @classmethod
     def _run_one_turn(cls, stdscr, player_idx: int, player_label: str) -> int:
         """Run one player's turn. Returns the score they achieved."""
@@ -1153,12 +812,12 @@ class PacManGame:
         curses.curs_set(0)
         stdscr.nodelay(True)
         stdscr.keypad(True)
-
+ 
         height, width = stdscr.getmaxyx()
         grid = cls._make_map()
-
+ 
         total_pellets = sum(1 for r in range(cls.ROWS) for c in range(cls.COLS) if grid[r][c] in (2, 3))
-
+ 
         sr, sc = cls.PLAYER_START
         player = {
             "row": sr, "col": sc,
@@ -1166,16 +825,16 @@ class PacManGame:
             "next_dr": 0, "next_dc": 1,
             "alive": True,
         }
-
+ 
         score = 0
-
+ 
         ghosts = [
             cls.Ghost(9,  9,  (0,  cls.COLS-1), 3, home_row=9,  home_col=9),
             cls.Ghost(9,  10, (0,  0),           4, home_row=9,  home_col=10),
             cls.Ghost(10, 9,  (cls.ROWS-1, cls.COLS-1), 5, home_row=10, home_col=9),
             cls.Ghost(10, 10, (cls.ROWS-1, 0),   6, home_row=10, home_col=10),
         ]
-
+ 
         lives = 3
         level = 1
         frigh_timer = 0
@@ -1184,25 +843,50 @@ class PacManGame:
         game_over = False
         win = False
         last_tick = time.monotonic()
-
+ 
+        # ── 3-2-1 countdown inside curses ────────────────────────────────────
+        stdscr.nodelay(False)
+        for count in (3, 2, 1):
+            stdscr.erase()
+            try:
+                msg = f"  {player_label} — Get Ready!  Starting in {count}..."
+                stdscr.addstr(cls.ROWS // 2, max(0, width // 2 - len(msg) // 2), msg, curses.A_BOLD)
+                stdscr.addstr(cls.ROWS // 2 + 2, 2,
+                              "Controls: W=Up  S=Down  A=Left  D=Right", curses.A_DIM)
+            except curses.error:
+                pass
+            stdscr.refresh()
+            time.sleep(1.0)
+        stdscr.erase()
+        try:
+            go_msg = "  GO!"
+            stdscr.addstr(cls.ROWS // 2, max(0, width // 2 - len(go_msg) // 2), go_msg, curses.A_BOLD)
+        except curses.error:
+            pass
+        stdscr.refresh()
+        time.sleep(0.4)
+        stdscr.nodelay(True)
+        last_tick = time.monotonic()
+        # ─────────────────────────────────────────────────────────────────────
+ 
         while running:
             # ── Input ─────────────────────────────────────────────────────────
             key = stdscr.getch()
             if key in (ord("q"), ord("Q")):
                 running = False
                 break
-
+ 
             if key in cls.WASD_KEYS:
                 dr, dc = cls.WASD_KEYS[key]
                 player["next_dr"] = dr
                 player["next_dc"] = dc
-
+ 
             now = time.monotonic()
             if now - last_tick < cls.TICK:
                 time.sleep(0.01)
                 continue
             last_tick = now
-
+ 
             # ── Move player ───────────────────────────────────────────────────
             if player["alive"]:
                 r, c = player["row"], player["col"]
@@ -1213,12 +897,12 @@ class PacManGame:
                     if cls._can_move(grid, r, c, dr, dc):
                         player["dr"], player["dc"] = dr, dc
                         break
-
+ 
                 nr = (r + player["dr"]) % cls.ROWS
                 nc = (c + player["dc"]) % cls.COLS
                 if grid[nr][nc] != 1:
                     player["row"], player["col"] = nr, nc
-
+ 
                 cell = grid[player["row"]][player["col"]]
                 if cell == 2:
                     grid[player["row"]][player["col"]] = 0
@@ -1232,7 +916,7 @@ class PacManGame:
                     for g in ghosts:
                         if not g.dead:
                             g.scared = True
-
+ 
             # ── Move ghosts ───────────────────────────────────────────────────
             if player["alive"]:
                 tr, tc = player["row"], player["col"]
@@ -1240,13 +924,13 @@ class PacManGame:
                 tr, tc = cls.PLAYER_START
             for g in ghosts:
                 cls._ghost_move(g, grid, tr, tc)
-
+ 
             if frigh_timer > 0:
                 frigh_timer -= 1
                 if frigh_timer == 0:
                     for g in ghosts:
                         g.scared = False
-
+ 
             # ── Collisions ────────────────────────────────────────────────────
             if player["alive"]:
                 for g in ghosts:
@@ -1258,9 +942,22 @@ class PacManGame:
                         elif not g.dead:
                             player["alive"] = False
                             lives -= 1
-
+ 
             # Respawn if lives remain
             if not player["alive"] and lives > 0:
+                # Brief death pause — show updated heart count
+                height, width = stdscr.getmaxyx()
+                cls._draw(stdscr, grid, player, ghosts, score, lives, level,
+                          frigh_timer, player_idx, player_label, height, width)
+                hearts_left = "♥" * lives + "♡" * (3 - lives)
+                death_msg = f"  💀 Got caught!  Lives left: {hearts_left}   Respawning..."
+                try:
+                    stdscr.addstr(PacManGame.ROWS + 2, 0, death_msg[:width-1], curses.A_BOLD)
+                except curses.error:
+                    pass
+                stdscr.refresh()
+                time.sleep(1.5)
+ 
                 sr2, sc2 = cls.PLAYER_START
                 player.update({
                     "row": sr2, "col": sc2,
@@ -1271,22 +968,24 @@ class PacManGame:
                 for g in ghosts:
                     g.reset()
                     g.row, g.col = g.home_row, g.home_col
-
+                last_tick = time.monotonic()
+                continue
+ 
             # Win / lose
             if pellets_eaten >= total_pellets:
                 win = True
                 score += 500
                 running = False
-
+ 
             if lives <= 0 or not player["alive"]:
                 game_over = True
                 running = False
-
+ 
             # ── Draw ──────────────────────────────────────────────────────────
             height, width = stdscr.getmaxyx()
             cls._draw(stdscr, grid, player, ghosts, score, lives, level,
                       frigh_timer, player_idx, player_label, height, width)
-
+ 
         # End screen
         stdscr.nodelay(False)
         stdscr.erase()
@@ -1301,42 +1000,30 @@ class PacManGame:
         stdscr.refresh()
         stdscr.getch()
         return score
-
+ 
     # ── Public interface ──────────────────────────────────────────────────────
-
+ 
     @classmethod
     def prompt_choice(cls) -> dict:
         """
-        Each player takes a turn one at a time on the same Pac-Man maze.
+        4 players take turns one at a time on the same Pac-Man maze.
+        No name or count prompts — jumps straight into P1's turn.
         Returns a dict with all individual scores.
         """
-        cprint("\n  🎮  Pac-Man — Turn-Based (up to 4 players)", C.YELLOW + C.BOLD)
-        cprint("  Players take turns one at a time on the same maze.", C.DIM)
+        cprint("\n  🎮  Pac-Man — 4-Player Turn-Based", C.YELLOW + C.BOLD)
+        cprint("  Each player takes a turn on the same maze.", C.DIM)
         cprint("  Controls: W=Up  S=Down  A=Left  D=Right  (WASD only)", C.WHITE)
-
-        while True:
-            cprint("\n  How many players? [1 / 2 / 3 / 4]", C.CYAN)
-            raw = input(f"  {C.BOLD}> {C.RESET}").strip()
-            if raw in ("1", "2", "3", "4"):
-                num_players = int(raw)
-                break
-            cprint("  ⚠  Enter 1, 2, 3, or 4.", C.YELLOW)
-
-        # Collect player names
-        player_names: List[str] = []
-        for i in range(num_players):
-            cprint(f"\n  Enter name for Player {i+1}:", C.WHITE)
-            name = input(f"  {C.BOLD}> {C.RESET}").strip()[:20]
-            if not name:
-                name = f"P{i+1}"
-            player_names.append(name)
-
+        cprint("  You have 3 lives per turn.  Press Q to end your turn early.", C.DIM)
+ 
+        num_players = 4
+        player_names = [f"Player {i+1}" for i in range(num_players)]
+ 
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             cprint("  ⚠  No interactive terminal. Returning zero scores.", C.YELLOW)
             return {name: 0 for name in player_names}
-
+ 
         all_scores: Dict[str, int] = {}
-
+ 
         for i, name in enumerate(player_names):
             cprint(f"\n  ──────────────────────────────────────", C.CYAN)
             cprint(f"  🎮  {name}'s turn!  (Player {i+1} of {num_players})", C.CYAN + C.BOLD)
@@ -1347,22 +1034,31 @@ class PacManGame:
                 input()
             except EOFError:
                 pass
-
+ 
+            # 3-2-1 countdown
+            cprint(f"\n  Get ready...", C.CYAN + C.BOLD)
+            for count in (3, 2, 1):
+                cprint(f"  {C.BOLD}{C.YELLOW}{count}...{C.RESET}", C.YELLOW)
+                time.sleep(1.0)
+            cprint(f"  {C.GREEN}{C.BOLD}GO!{C.RESET}\n", C.GREEN)
+            time.sleep(0.3)
+ 
             try:
                 score = curses.wrapper(cls._run_one_turn, i, name)
             except Exception as e:
                 cprint(f"  ⚠  Pac-Man couldn't launch for {name}: {e}", C.YELLOW)
                 score = 0
-
+ 
             all_scores[name] = score
             cprint(f"\n  ✔  {name} finished with {score} pts!", C.GREEN + C.BOLD)
-
+ 
             if i < num_players - 1:
-                cprint(f"  Passing to the next player...", C.DIM)
+                next_name = player_names[i + 1]
+                cprint(f"  Passing to {next_name}...", C.DIM)
                 time.sleep(1.5)
-
+ 
         return all_scores
-
+ 
     @staticmethod
     def resolve(choices: dict) -> dict:
         """choices = {player_name: score_int}. Highest score wins."""
@@ -1372,7 +1068,7 @@ class PacManGame:
                 player_scores[player] = int(result)
             except (TypeError, ValueError):
                 player_scores[player] = 0
-
+ 
         max_score = max(player_scores.values(), default=0)
         winners = [p for p, s in player_scores.items() if s == max_score and max_score > 0]
         return {
@@ -1380,7 +1076,7 @@ class PacManGame:
             "winners": winners,
             "high_score": max_score,
         }
-
+ 
     @staticmethod
     def format_result(result: dict, my_name: str) -> str:
         player_scores = result["player_scores"]
@@ -1395,6 +1091,7 @@ class PacManGame:
         else:
             lines.append(f"\n  {C.RED}Better luck next maze!{C.RESET}")
         return "\n".join(lines)
+
 
 
 # ── Game Registry ──────────────────────────────────────────────────────────────
