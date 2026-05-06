@@ -32,6 +32,7 @@ import subprocess
 import sys
 import threading
 import time
+import hashlib
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 try:
@@ -1512,7 +1513,7 @@ class Server:
                 pass
             return
 
-        provided_password = str(msg.get("password", ""))
+        provided_password = str(msg.get("password_hash", ""))
 
         if self.join_password and provided_password != self.join_password:
             send_msg(conn, {
@@ -1654,7 +1655,12 @@ class Server:
             except EOFError:
                 entered_pw = ""
 
-            self.join_password = entered_pw[:32]
+            raw_password = entered_pw[:32]
+
+            self.join_password = hashlib.sha256(
+                raw_password.encode("utf-8")
+            ).hexdigest()
+            print(self.join_password)
 
             if self.join_password:
                 cprint("  🔒 Password protection enabled.", C.GREEN)
@@ -1832,6 +1838,12 @@ class Client:
             password = input(f"  {C.BOLD}Password > {C.RESET}").strip()
         except EOFError:
             password = ""
+
+        password = hashlib.sha256(
+            password.encode("utf-8")
+        ).hexdigest()
+
+        print(password)
                 
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1847,7 +1859,7 @@ class Client:
         if not send_msg(self.sock, {
             "type": "join",
             "name": self.name,
-            "password": password,
+            "password_hash": password,
         }):
             cprint("  ✘  Failed to send join message.", C.RED)
             return
