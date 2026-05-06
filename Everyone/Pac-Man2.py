@@ -234,9 +234,9 @@ class RockPaperScissors:
 
     @staticmethod
     def format_result(result: dict, my_name: str) -> str:
-        cpu = result["cpu"]
-        choices = result["choices"]
-        outcomes = result["outcomes"]
+        cpu = result.get("cpu", "unknown")  # FIX: use .get() to avoid KeyError on stale result
+        choices = result.get("choices", {})
+        outcomes = result.get("outcomes", {})
         emoji = RockPaperScissors.EMOJI
         cpu_emoji = emoji.get(cpu, "?")
         lines = [f"\n  🤖  Computer played: {C.BOLD}{C.YELLOW}{cpu_emoji} {cpu}{C.RESET}\n"]
@@ -1852,8 +1852,11 @@ class Client:
                     game_name = msg.get("game", "")
                     result = msg.get("result", {})
                     game_class = game_map.get(game_name)
-                    if game_class:
-                        print(game_class.format_result(result, confirmed))
+                    if game_class and result:
+                        try:  # FIX: catch KeyError if a stale/mismatched result arrives
+                            print(game_class.format_result(result, confirmed))
+                        except KeyError as e:
+                            cprint(f"  ⚠  Result display error (mismatched game data: {e}). Skipping.", C.YELLOW)
                     cprint(f"\n  {C.DIM}Waiting for next round...{C.RESET}", C.DIM)
 
                 elif mtype == "scoreboard":
